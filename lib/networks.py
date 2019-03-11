@@ -3,6 +3,93 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import init
 import functools
+
+class _ConvLayer(nn.Sequential):
+    def __init__(self, norm_layer,input_features, output_features):
+        super(_ConvLayer, self).__init__()
+        self.add_module('conv_1', Conv2d(input_features, output_features,
+                                        kernel_size=3, stride=2, padding =1))
+        self.add_module('conv_2', Conv2d(output_features, output_features,
+                                kernel_size=3, stride=1, padding =1))
+        self.add_module('norm',norm_layer(output_features))
+        self.add_module('relu', nn.ReLU(True))
+
+class _UpScale(nn.Sequential):
+    def __init__(self, norm_layer,input_features, output_features):
+        super(_UpScale, self).__init__()
+        self.add_module('convtrans',nn.ConvTranspose2d(input_features, output_features, kernel_size=3, stride=2, padding=1, output_padding=1))
+        self.add_module('conv', Conv2d(output_features, output_features,
+                                kernel_size=3, stride=1, padding =1))
+        self.add_module('norm',norm_layer(output_features))
+        self.add_module('relu',nn.ReLU(True))
+
+
+        self.add_module('conv2_', Conv2d(input_features, output_features * 4,
+                                         kernel_size=3))
+        self.add_module('leakyrelu', nn.LeakyReLU(0.1, inplace=True))
+        self.add_module('pixelshuffler', _PixelShuffler())
+
+class _Flatten(nn.Module):
+    def forward(self, input):
+        output = input.view(input.size(0), -1)
+        return output
+
+class _Reshape(nn.Module):
+    def forward(self, input):
+        output = input.view(-1, 1024, 4, 4)  # channel * 4 * 4
+        return output
+
+class AutoEncoder(nn.Module):
+    def __init__(self,in_batch):
+        super(AutoEncoder,self).__init__()
+        if in_batch:
+            norm_layer = functools.partial(nn.BatchNorm2d, affine=False, track_running_stats=False)
+        else:
+            norm_layer = functools.partial(nn.InstanceNorm2d, affine=False, track_running_stats=False)
+        self.encoder = nn.Sequential(
+                nn.ReflectionPad2d(3),
+                nn.Conv2d(3, 32, kernel_size=7, padding=0),
+                norm_layer(32),
+                nn.ReLU(True),
+                _ConvLayer(norm_layer,32,64), #128->64
+                _ConvLayer(norm_layer,64,128), #64->32
+                _ConvLayer(norm_layer,128,256), #32->16
+                _ConvLayer(norm_layer,256,512), #16->8
+                _ConvLayer(norm_layer,512,1024), #8->4
+                _Flatten(),
+                nn.Linear(1024*4*4,1024),
+                nn.Linear(1024,1024*4*4),
+                Reshape(),
+                _UpScale(norm_layer,1024,512), #4->8
+            )
+        self.decoder_real = nn.Sequential(
+            _UpScale(norm_layer,512,256), #8->16
+            _UpScale(norm_layer,256,128), #16->32
+            _UpScale(norm_layer,128,64), #32->64
+            _UpScale(norm_layer,64,32), #64->128
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(32, 3, kernel_size=7, padding=0),
+            nn.Tanh()
+            )
+
+        self.decoder_anime = nn.Sequential(
+            _UpScale(norm_layer,512,256), #8->16
+            _UpScale(norm_layer,256,128), #16->32
+            _UpScale(norm_layer,128,64), #32->64
+            _UpScale(norm_layer,64,32), #64->128
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(32, 3, kernel_size=7, padding=0),
+            nn.Tanh()
+            )
+
+    def forward(self, input, select):
+        if select == 'real':
+            out = self.encoder(input)
+            out = self.decoder_real(out)
+        else:
+            out = self.encoder(input)
+            out = self.decoder_anime(out)
+        return out
     
 class Discriminator(nn.Module):
     def __init__(self, input_nc, out_nc, ndf=64, n_layers=3, use_sigmoid=False, in_batch=False):
